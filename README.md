@@ -1,8 +1,8 @@
 # RBAC
 rolebinding
 
-kubectl config use-context nitin-context
-kubectl config get-contexts
+# kubectl config use-context nitin-context
+# kubectl config get-contexts
 
 
 ############### ClusterRolebuinding ############

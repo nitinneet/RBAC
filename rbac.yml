@@ -1,0 +1,125 @@
+# rbac.yml
+# This playbook ensures that the service account tokens are created and managed by Kubernetes, 
+# which will make them long-lived and stable, reducing the risk of token expiration.
+# ansible 2.9.6
+---
+- name: RBAC
+  hosts: localhost
+  gather_facts: yes
+  vars:
+    namespaces:
+      - name: iam-demo
+        service_account: iam-demo-sa
+      - name: iam-demoo
+        service_account: iam-demoo-sa
+    date: "{{ lookup('pipe', 'date +%Y-%m-%d') }}"
+    time: "{{ lookup('pipe', 'date +%H.%M.%S') }}"
+    role_name: full-access
+    log_file: "/tmp/rbac_{{ date }}_{{ time }}.log"
+    tokens_file: "/tmp/tokens_{{ date }}_{{ time }}.txt"
+
+  tasks:
+    - name: RBAC | Display Start Message
+      debug:
+        msg: |
+          ***************** Start RBAC process *******************
+          Start Date: {{ date }}
+          Start Time: {{ time }}
+
+    - name: Check if namespace exists
+      command: "kubectl get namespace {{ item.name }}"
+      register: namespace_check
+      loop: "{{ namespaces }}"
+
+    - name: Check if service account exists
+      command: "kubectl get sa {{ item.service_account }} -n {{ item.name }}"
+      ignore_errors: yes
+      register: sa_check
+      when: namespace_check is succeeded
+      loop: "{{ namespaces }}"
+
+    - name: Create service account
+      command: "kubectl create sa {{ item.service_account }} -n {{ item.name }}"
+      when:
+        - namespace_check is succeeded
+        - sa_check is failed
+      loop: "{{ namespaces }}"
+
+    - name: Create secret for service account
+      shell: |
+        kubectl apply -f - <<EOF
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: {{ item.service_account }}-token
+          namespace: {{ item.name }}
+          annotations:
+            kubernetes.io/service-account.name: "{{ item.service_account }}"
+        type: kubernetes.io/service-account-token
+        EOF
+      register: secret_creation
+      when: namespace_check is succeeded
+      loop: "{{ namespaces }}"
+
+    - name: Extract token from the secret
+      shell: >
+        kubectl get secret {{ item.service_account }}-token
+        -n {{ item.name }}
+        -o jsonpath='{.data.token}' | base64 --decode
+      register: sa_tokens
+      when: namespace_check is succeeded
+      loop: "{{ namespaces }}"
+
+    - name: Store token in text file
+      shell: "echo 'Token for namespace {{ item.item.name }}: {{ item.stdout }}' >> {{ tokens_file }}"
+      when: namespace_check is succeeded
+      loop: "{{ sa_tokens.results | default([]) }}"
+
+    - name: Create role if not exists
+      shell: |
+        kubectl get role {{ role_name }} -n {{ item.name }} || \
+        kubectl apply -f - <<EOF
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: Role
+        metadata:
+          namespace: {{ item.name }}
+          name: {{ role_name }}
+        rules:
+        - apiGroups: ["*"]
+          resources: ["*"]
+          verbs: ["*"]
+        EOF
+      when: namespace_check is succeeded
+      loop: "{{ namespaces }}"
+
+    - name: Create role binding
+      shell: |
+        kubectl apply -f - <<EOF
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: RoleBinding
+        metadata:
+          name: {{ role_name }}-binding
+          namespace: {{ item.name }}
+        subjects:
+        - kind: ServiceAccount
+          name: {{ item.service_account }}
+          namespace: {{ item.name }}
+        roleRef:
+          kind: Role
+          name: {{ role_name }}
+          apiGroup: rbac.authorization.k8s.io
+        EOF
+      when: namespace_check is succeeded
+      loop: "{{ namespaces }}"
+
+    - name: Log token information
+      shell: "echo 'Token for namespace {{ item.item.name }}: {{ item.stdout }}' >> {{ log_file }}"
+      when: namespace_check is succeeded
+      loop: "{{ sa_tokens.results | default([]) }}"
+
+    - name: RBAC | Display END Message
+      debug:
+        msg: |
+          ***************** Finish RBAC process *******************
+          Start Date: {{ date }}
+          Start Time: {{ time }}
